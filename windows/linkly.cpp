@@ -313,87 +313,21 @@ int Linkly::init_purchase(std::string reference, int purchase_amount, int cashou
 
     std::string receipt = "";
     std::string receipt_type = "MERCHANT";
+    int curr_len = 0;
+    int message_len = -1;
+    std::vector<char> response;
 
     do {
         iResult = recv(s, buffer, DEFAULT_BUFLEN, 0);
         if (iResult > 0) {
             std::vector<char> buffer_vec(buffer, buffer + iResult);
-
-            std::cout << buffer_vec.data() << std::endl;
-
-            char start_flag = buffer_vec[0];
-            if (start_flag != '#') {
-                std::cout << "STRAT_FLAG does not match!" << std::endl;
-                transac_flow_changed(true, "ERROR: STRAT_FLAG does not match!", "FAILED");
-                return 1;
+            if (curr_len == 0) {
+                std::vector<char> msg_length = std::vector<char>(buffer_vec.begin() + 1, buffer_vec.begin() + 5);
+                message_len = std::stoi(msg_length);                    
             }
+            response.insert(response.end(), buffer_vec.begin(), bufferr_vec.end());
+            curr_len += iResult;
 
-            // Check for event type
-            // M: Transaction event, read the response text and check if transaction is successful
-            // S: Display event, read the response text and pass it on to POS
-            // 3: Receipt event, print receipt
-            char command_code = buffer_vec[5];
-            if (command_code == 'M') {
-                char success_flag = buffer_vec[7];
-
-                std::string res_text(buffer_vec.begin() + 10, buffer_vec.begin() + 30);
-
-                std::string res_code(buffer_vec.begin() + 8, buffer_vec.begin() + 10);
-
-                reference = std::string(buffer_vec.begin() + 73, buffer_vec.begin() + 89);
-
-                if (success_flag == '1') {
-                    std::cout << "Transaction successful!" << std::endl;
-                    transac_flow_changed(true, res_text, "SUCCESS", receipt);
-                    return 0;
-
-                } else {
-                    transac_flow_changed(true, res_text, "FAILED", receipt);
-                    // Operator cancelled
-                    if (res_code == "TM") {
-                        return 0;
-                    }
-                    return 1;
-                }
-            } else if (command_code == 'S') {
-                std::string res_text(buffer_vec.begin() + 11, buffer_vec.begin() + 50);
-
-                allow_cancel = buffer_vec[51] == '1';
-
-                transac_flow_changed(false, res_text, "");
-
-                if (buffer_vec[56] == '1') {
-                    iResult = send(s, "#0008Y00", 8, 0);
-                    if (iResult == SOCKET_ERROR) {
-                        transac_flow_changed(true, "ERROR: Confirm response send failed", "FAILED");
-                        printf("send failed: %d\n", iResult);
-                        closesocket(s);
-                        WSACleanup();
-                        return 1;
-                    }
-                } else if (res_text.substr(0, 9) == "SIGNATURE") {
-                    transac_flow_changed(false, "Please confirm signature", "UNKNOWN", "", false, true, receipt);
-                }
-
-            } else if (command_code == '3') {
-                char sub_code = buffer_vec[6];
-                if (sub_code == 'M') {
-                    receipt_type = "MERCHANT";
-                } else if (sub_code == 'C') {
-                    receipt_type = "CUSTOMER";
-                } else if (sub_code == 'R') {
-                    // Store Receipt
-                    receipt = std::string(buffer_vec.begin() + 7, buffer_vec.end());
-                }
-                iResult = send(s, "#00073 ", 7, 0);
-                if (iResult == SOCKET_ERROR) {
-                    transac_flow_changed(false, "ERROR: receipt response failed", "FAILED");
-                    printf("send failed: %d\n", iResult);
-                    closesocket(s);
-                    WSACleanup();
-                    return 1;
-                }
-            }
         } else if (iResult == 0) {
             transac_flow_changed(true, "ERROR: Connection closed", "FAILED");
             printf("Connection closed\n");
@@ -405,7 +339,84 @@ int Linkly::init_purchase(std::string reference, int purchase_amount, int cashou
             close_connection();
             return 1;
         }
-    } while (true);
+    } while (curr_len != message_len);
+
+    // Handle message
+    std::cout << response.data() << std::endl;
+
+    char start_flag = response[0];
+    if (start_flag != '#') {
+        std::cout << "STRAT_FLAG does not match!" << std::endl;
+        transac_flow_changed(true, "ERROR: STRAT_FLAG does not match!", "FAILED");
+        return 1;
+    }
+
+    // Check for event type
+    // M: Transaction event, read the response text and check if transaction is successful
+    // S: Display event, read the response text and pass it on to POS
+    // 3: Receipt event, print receipt
+    char command_code = response[5];
+    if (command_code == 'M') {
+        char success_flag = response[7];
+
+        std::string res_text(response.begin() + 10, response.begin() + 30);
+
+        std::string res_code(response.begin() + 8, response.begin() + 10);
+
+        reference = std::string(response.begin() + 73, response.begin() + 89);
+
+        if (success_flag == '1') {
+            std::cout << "Transaction successful!" << std::endl;
+            transac_flow_changed(true, res_text, "SUCCESS", receipt);
+            return 0;
+
+        } else {
+            transac_flow_changed(true, res_text, "FAILED", receipt);
+            // Operator cancelled
+            if (res_code == "TM") {
+                return 0;
+            }
+            return 1;
+        }
+    } else if (command_code == 'S') {
+        std::string res_text(response.begin() + 11, response.begin() + 50);
+
+        allow_cancel = response[51] == '1';
+
+        transac_flow_changed(false, res_text, "");
+
+        if (response[56] == '1') {
+            iResult = send(s, "#0008Y00", 8, 0);
+            if (iResult == SOCKET_ERROR) {
+                transac_flow_changed(true, "ERROR: Confirm response send failed", "FAILED");
+                printf("send failed: %d\n", iResult);
+                closesocket(s);
+                WSACleanup();
+                return 1;
+            }
+        } else if (res_text.substr(0, 9) == "SIGNATURE") {
+            transac_flow_changed(false, "Please confirm signature", "UNKNOWN", "", false, true, receipt);
+        }
+
+    } else if (command_code == '3') {
+        char sub_code = response[6];
+        if (sub_code == 'M') {
+            receipt_type = "MERCHANT";
+        } else if (sub_code == 'C') {
+            receipt_type = "CUSTOMER";
+        } else if (sub_code == 'R') {
+            // Store Receipt
+            receipt = std::string(response.begin() + 7, response.end());
+        }
+        iResult = send(s, "#00073 ", 7, 0);
+        if (iResult == SOCKET_ERROR) {
+            transac_flow_changed(false, "ERROR: receipt response failed", "FAILED");
+            printf("send failed: %d\n", iResult);
+            closesocket(s);
+            WSACleanup();
+            return 1;
+        }
+    }
 
     return 0;
 }
@@ -858,9 +869,9 @@ std::string Linkly::get_last_transac() {
     do {
         iResult = recv(s, buffer, DEFAULT_BUFLEN, 0);
         if (iResult > 0) {
-            if (buffer[7] == '1'){
+            if (buffer[7] == '1') {
                 return "";
-            }else{
+            } else {
                 return buffer;
             }
 
